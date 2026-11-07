@@ -2,7 +2,7 @@
 import { buildBundle, mapExcluded, findJudgement, parseAreas, groupFolders, fileMime, bundleFileName, orderFolderRefs, MAX_BUNDLE_BYTES, DECISIONS } from './core.js';
 import { listDepts, registerRef, removeRef, loadRefs } from './refs.js';
 import { buildReport } from './report.js';
-import { runCase, pollCase, createQueue, describeError } from './run.js';
+import { runCase, pollCase, describeError } from './run.js';
 import { STATUS_LABEL, judged, countCases, buildAnswerJson, buildCsv, reportCases, singleReportName, batchReportName } from './export.js';
 
 const MOCK = new URLSearchParams(location.search).get('mock') === '1';
@@ -58,7 +58,7 @@ const state = {
   folder: emptyFolder(),
 };
 function emptyFolder() {
-  return { files: [], groups: [], skipped: [], batchDept: '', overrides: {}, excluded: new Set(), error: '', busy: false };
+  return { groups: [], skipped: [], excluded: new Set(), error: '', busy: false };
 }
 
 // 메모리에만 두는 것: 묶음 PDF 바이트, 원본 파일, Blob 주소, 판정 근거 불러오는 상태
@@ -180,7 +180,6 @@ async function refreshDepts() {
   state.extraDepts = state.extraDepts.filter((d) => !names.has(d));
   state.depts = [...listed, ...state.extraDepts.map((dept) => ({ dept, docs: [], missing: Object.keys(TYPE_LABEL), ready: false }))]
     .sort((a, b) => a.dept.localeCompare(b.dept, 'ko'));
-  regroupFolder();
   renderRefs();
   renderUpload();
 }
@@ -352,71 +351,52 @@ function singleTab() {
       !canAdd && h('span', { class: 'hint' }, s.bundled || s.dept ? '파일을 올려주세요' : '학과를 고르고 파일을 올려주세요')));
 }
 
-function regroupFolder() {
-  const f = state.folder;
-  if (!f.files.length) return;
-  const names = state.depts.map((d) => d.dept).sort((a, b) => b.length - a.length); // 긴 이름부터 찾아요(겹치는 학과명 대비)
-  const { groups, skipped } = groupFolders(f.files, names);
-  f.groups = groups;
-  f.skipped = skipped;
-  f.error = groups.length ? '' : '학생마다 폴더를 하나씩 만들어 그 위 폴더를 골라주세요';
-}
+const MSG_FOLDER = '학과/학번_이름 폴더 아래에 파일을 두고, 학과 폴더나 그 위 폴더를 골라주세요';
 
-const folderDept = (g) => state.folder.overrides[g.folder] ?? g.dept ?? (state.folder.batchDept || null);
-const groupRunnable = (g) => !state.folder.excluded.has(g.folder) && g.items.length > 0 && !!folderDept(g);
+// 학생 폴더에 기준문서가 없으면 경로의 학과에 3종이 다 등록돼 있어야 해요
+const folderRefsReady = (g) => g.refs.length > 0 || !!state.depts.find((d) => d.dept === g.dept)?.ready;
+const groupRunnable = (g) => !state.folder.excluded.has(g.key) && g.items.length > 0 && folderRefsReady(g);
 
 function refsSource(g) {
-  const dept = folderDept(g);
   if (g.refs.length) return `폴더의 기준문서 ${g.refs.length}개`;
-  if (!dept) return '-';
-  const info = state.depts.find((d) => d.dept === dept);
-  return info?.ready ? '학과 기준문서' : missingMessage(info?.missing ?? Object.keys(TYPE_LABEL));
+  const info = state.depts.find((d) => d.dept === g.dept);
+  if (info?.ready) return '학과 기준문서';
+  return h('div', { class: 'error-text' }, info ? missingMessage(info.missing) : '등록되지 않은 학과예요. 폴더 이름을 확인하거나 기준문서에서 학과를 추가해주세요');
 }
 
 function folderTab() {
   const f = state.folder;
   const choose = (files) => {
-    state.folder = { ...emptyFolder(), batchDept: f.batchDept };
-    state.folder.files = files.sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name, 'ko'));
-    if (!files.length) state.folder.error = '학생마다 폴더를 하나씩 만들어 그 위 폴더를 골라주세요';
-    regroupFolder();
+    const { groups, skipped } = groupFolders(files);
+    state.folder = { ...emptyFolder(), groups, skipped, error: groups.length ? '' : MSG_FOLDER };
     renderUpload();
   };
-  const topSkipped = f.skipped.filter((p) => p.split('/').length < 3);
-  const skippedIn = (g) => f.skipped.filter((p) => p.split('/')[1] === g.folder && p.split('/').length >= 3).map((p) => p.split('/').pop());
   const runnable = f.groups.filter(groupRunnable);
   const rows = f.groups.map((g) => {
-    const out = f.excluded.has(g.folder);
-    const dept = folderDept(g);
-    const skip = skippedIn(g);
-    return h('tr', { class: out ? 'excluded' : null, 'data-folder': g.folder },
-      h('td', {}, h('input', { type: 'checkbox', checked: !out, 'aria-label': `${g.folder} 포함`, onchange: (e) => {
-        if (e.target.checked) f.excluded.delete(g.folder); else f.excluded.add(g.folder);
+    const out = f.excluded.has(g.key);
+    return h('tr', { class: out ? 'excluded' : null, 'data-folder': g.key },
+      h('td', {}, h('input', { type: 'checkbox', checked: !out, 'aria-label': `${g.dept} ${g.folder} 포함`, onchange: (e) => {
+        if (e.target.checked) f.excluded.delete(g.key); else f.excluded.add(g.key);
         renderUpload();
       } })),
-      h('th', { scope: 'row' }, g.folder),
-      h('td', {},
-        h('select', { 'aria-label': `${g.folder} 학과`, onchange: (e) => { f.overrides[g.folder] = e.target.value || null; renderUpload(); } }, deptOptions(dept, '학과 고르기')),
-        !out && !dept && h('div', { class: 'error-text' }, '이 폴더의 학과를 골라주세요')),
-      h('td', { class: 'mono nowrap' }, g.inputStudentId || '-'),
+      h('td', {}, g.dept),
+      h('td', { class: 'mono nowrap' }, g.inputStudentId),
+      h('th', { scope: 'row' }, g.inputName),
       h('td', { class: 'num' }, g.items.length, g.items.length === 0 && h('div', { class: 'error-text' }, '학생 서류가 없어요')),
       h('td', {}, refsSource(g)),
-      h('td', {}, skip.length ? skip.join(', ') : '-'));
+      h('td', {}, g.skipped.length ? g.skipped.join(', ') : '-'));
   });
   return h('div', { class: 'stack' },
-    h('div', { class: 'row' },
-      h('label', { class: 'field grow' }, h('span', {}, '일괄 학과'),
-        h('select', { onchange: (e) => { f.batchDept = e.target.value; renderUpload(); } }, deptOptions(f.batchDept, '고르지 않음')))),
-    h('p', { class: 'hint' }, '일괄 학과는 폴더 이름에 학과명이 없는 폴더에 써요.'),
-    dropzone({ directory: true, title: '상위 폴더 고르기', onFiles: choose, onDropTransfer: choose }),
+    h('p', { class: 'hint' }, '폴더를 학과/학번_이름/파일 모양으로 두면 경로에서 학과, 학번(10자리), 이름을 읽어요. 학과 폴더 이름은 시행세칙 제목의 학과명과 한 글자도 다르지 않아야 해요.'),
+    dropzone({ directory: true, title: '학과 폴더나 그 위 폴더 고르기', onFiles: choose, onDropTransfer: choose }),
     f.error && h('p', { class: 'error-text' }, f.error),
     f.groups.length > 0 && h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, h('th', {}, '포함'), h('th', {}, '폴더'), h('th', {}, '학과'), h('th', {}, '학번'), h('th', { class: 'num' }, '학생 파일'), h('th', {}, '기준문서 출처'), h('th', {}, '건너뛴 파일'))),
+      h('thead', {}, h('tr', {}, h('th', {}, '포함'), h('th', {}, '학과'), h('th', {}, '학번'), h('th', {}, '이름'), h('th', { class: 'num' }, '학생 파일'), h('th', {}, '기준문서 출처'), h('th', {}, '건너뛴 파일'))),
       h('tbody', {}, rows))),
-    topSkipped.length > 0 && h('p', { class: 'hint' }, `학생 폴더 밖이라 건너뛴 파일: ${topSkipped.join(', ')}`),
+    f.skipped.length > 0 && h('p', { class: f.groups.length ? 'hint' : 'error-text' }, `학과/학번_이름 폴더 밖이라 건너뛴 파일: ${f.skipped.join(', ')}`),
     f.groups.length > 0 && h('div', { class: 'row center' },
       h('button', { class: 'btn primary', type: 'button', disabled: !runnable.length || f.busy, onclick: runFolderCases }, f.busy ? '묶는 중…' : `전부 실행 (${runnable.length}건)`),
-      h('span', { class: 'hint' }, `학과를 고르지 않은 폴더는 실행하지 않아요. ${f.groups.length}개 폴더 중 ${runnable.length}개를 실행해요.`)));
+      h('span', { class: 'hint' }, `기준문서나 학생 서류가 없는 폴더는 실행하지 않아요. ${f.groups.length}개 폴더 중 ${runnable.length}개를 실행해요.`)));
 }
 
 function renderUpload() {
@@ -431,7 +411,7 @@ const nextNumber = () => state.cases.reduce((max, c) => Math.max(max, Number(c.i
 
 function newCase(fields) {
   const n = nextNumber();
-  return { id: `c_${String(n).padStart(4, '0')}`, source: 'single', label: '', fileName: bundleFileName(state.round, n), dept: '', refsFrom: 'dept', inputStudentId: '',
+  return { id: `c_${String(n).padStart(4, '0')}`, source: 'single', label: '', fileName: bundleFileName(state.round, n), dept: '', refsFrom: 'dept', inputStudentId: '', inputName: '',
     pageMap: [], status: 'RECEIVED', fileId: null, jobId: null, startedAt: null, finishedAt: null, result: null, areas: null, areasRaw: null, errors: [], warnings: [], error: null, errorCode: null, raw: null, checked: false, memo: '', ...fields };
 }
 
@@ -495,46 +475,44 @@ async function runFolderCases() {
   const groups = f.groups.filter(groupRunnable);
   let started = 0;
   for (const g of groups) {
-    const c = newCase({ source: 'folder', label: g.folder, dept: folderDept(g), refsFrom: g.refs.length ? 'folder' : 'dept', inputStudentId: g.inputStudentId });
+    const c = newCase({ source: 'folder', label: g.folder, dept: g.dept, refsFrom: g.refs.length ? 'folder' : 'dept', inputStudentId: g.inputStudentId, inputName: g.inputName });
     state.cases.push(c);
     sources.set(c.id, { items: g.items.map(toItem), refs: g.refs.map((file) => ({ name: file.name.normalize('NFC'), file })) });
-    if (await buildCase(c)) { enqueue(c.id); started++; }
+    if (await buildCase(c)) { startCase(c.id); started++; }
   }
-  state.folder = { ...emptyFolder(), batchDept: f.batchDept };
+  state.folder = emptyFolder();
   renderUpload();
   showView('list');
   notify(`${groups.length}건을 만들어 ${started}건을 실행해요${groups.length > started ? `. ${groups.length - started}건은 검증실패예요` : ''}`);
 }
 
 // ───── 실행 (PF-05, PF-10) ─────
-const queue = createQueue(async ({ id, resume }) => {
+// 건마다 따로 돌아요. 기다리지 않고 바로 올려 실행하고, 각자 폴링해요
+async function execute(id, resume = false) {
   const c = findCase(id);
   if (!c) return;
   try {
     if (resume) await pollCase(c, save);
-    else {
-      patchCase(id, { status: 'RUNNING', startedAt: new Date().toISOString() });
-      await runCase({ ...c, name: c.fileName, bytes: bundles.get(id) }, save);
-    }
+    else await runCase({ ...c, name: c.fileName, bytes: bundles.get(id) }, save);
   } catch (e) {
     patchCase(id, { status: 'FAILED', finishedAt: new Date().toISOString(), ...describeError(e) });
   }
-});
+}
 
 const canRun = (c) => ['RECEIVED', 'REVIEW', 'FAILED'].includes(c.status) && bundles.has(c.id);
 const runLabel = (c) => (['REVIEW', 'FAILED'].includes(c.status) ? '재실행' : '실행');
 
-function enqueue(id) {
+function startCase(id) {
   const c = findCase(id);
   if (!c || !canRun(c)) return;
-  patchCase(id, { status: 'QUEUED', fileId: null, jobId: null, startedAt: null, finishedAt: null, result: null, areas: null, areasRaw: null, errors: [], warnings: [], error: null, errorCode: null, raw: null, checked: false });
+  patchCase(id, { status: 'RUNNING', fileId: null, jobId: null, startedAt: new Date().toISOString(), finishedAt: null, result: null, areas: null, areasRaw: null, errors: [], warnings: [], error: null, errorCode: null, raw: null, checked: false });
   evidence.delete(id);
-  queue.add({ id });
+  execute(id);
 }
 
 function rerun(c) {
   if (c.status === 'REVIEW' && !window.confirm('지금 결과를 지우고 다시 실행할까요? 확인함 표시도 풀려요')) return;
-  enqueue(c.id);
+  startCase(c.id);
 }
 
 // 페이지를 다시 열었을 때: job id가 있는 건은 이어서 확인, 나머지는 파일을 다시 올려야 해요
@@ -544,7 +522,7 @@ function restoreCases() {
   state.cases = saved;
   for (const c of state.cases) {
     if (c.status === 'RUNNING' && c.jobId) continue;
-    if (c.status === 'RUNNING' || c.status === 'QUEUED') {
+    if (c.status === 'RUNNING' || c.status === 'QUEUED') { // QUEUED는 큐가 있던 때 저장된 건이에요
       if (c.fileId) fetch(`/api/files/${c.fileId}`, { method: 'DELETE' }).catch(() => {}); // 실행 전에 끊겼으니 올린 파일을 지워요
       Object.assign(c, { status: 'RECEIVED', fileId: null, startedAt: null });
     }
@@ -567,7 +545,7 @@ function decisionChip(c) {
 }
 
 function statusTag(c) {
-  const cls = { REVIEW: 'ok', FAILED: 'bad', INVALID: 'bad', RUNNING: 'active', QUEUED: 'active' }[c.status] || '';
+  const cls = { REVIEW: 'ok', FAILED: 'bad', INVALID: 'bad', RUNNING: 'active' }[c.status] || '';
   return h('span', { class: `tag ${cls}` }, STATUS_LABEL[c.status] ?? c.status);
 }
 
@@ -587,14 +565,14 @@ function renderList() {
     return h('tr', { class: c.id === state.selectedId ? 'selected' : null, 'data-case': c.id, onclick: () => selectCase(c.id) },
       h('th', { scope: 'row' }, h('button', { class: 'link', type: 'button', onclick: (e) => { e.stopPropagation(); selectCase(c.id); } }, c.label)),
       h('td', { class: 'mono nowrap' }, c.result?.student_id || c.inputStudentId || '-'),
-      h('td', {}, c.result?.applicant_name || '-'),
+      h('td', {}, c.result?.applicant_name || c.inputName || '-'),
       h('td', {}, c.dept || '-'),
       h('td', {}, decisionChip(c)),
       h('td', {}, statusTag(c)),
       h('td', {}, warnings.length ? h('span', { class: 'warn-count', title: warnings.join('\n') }, `경고 ${warnings.length}`) : ''),
       h('td', {}, c.checked && h('span', { class: 'checked-mark', title: '담당자 확인함', 'aria-label': '담당자 확인함' }, '✓')),
       h('td', { class: 'num' }, showRun && h('button', { class: 'btn small', type: 'button', disabled: !canRun(c), title: needFiles ? '파일을 다시 올려주세요' : c.status === 'INVALID' ? c.error : null,
-        onclick: (e) => { e.stopPropagation(); enqueue(c.id); } }, runLabel(c))));
+        onclick: (e) => { e.stopPropagation(); startCase(c.id); } }, runLabel(c))));
   });
   const waiting = state.cases.filter((c) => c.status === 'RECEIVED' && bundles.has(c.id));
   updateShell(); // 탭의 건수를 맞춰요
@@ -602,6 +580,12 @@ function renderList() {
   if (runAll) {
     runAll.disabled = waiting.length === 0;
     runAll.textContent = `전부 실행 (${waiting.length}건)`;
+  }
+  const reset = $('reset-list');
+  if (reset) {
+    const running = state.cases.some((c) => c.status === 'RUNNING');
+    reset.disabled = state.cases.length === 0 || running;
+    reset.title = running ? '실행 중인 건이 끝나면 초기화할 수 있어요' : '';
   }
   put($('list'), state.cases.length === 0
     ? h('p', { class: 'empty' }, '아직 사정 건이 없어요. 서류 올리기에서 파일이나 폴더를 올려주세요.')
@@ -620,8 +604,23 @@ function buildListTools() {
     filter('판정', 'decision', DECISIONS.map((d) => [d, d])),
     filter('상태', 'status', Object.entries(STATUS_LABEL)),
     h('button', { id: 'run-all', class: 'btn primary', type: 'button', onclick: () => {
-      state.cases.filter((c) => c.status === 'RECEIVED' && bundles.has(c.id)).forEach((c) => enqueue(c.id));
-    } }, '전부 실행'));
+      state.cases.filter((c) => c.status === 'RECEIVED' && bundles.has(c.id)).forEach((c) => startCase(c.id));
+    } }, '전부 실행'),
+    h('button', { id: 'reset-list', class: 'btn danger', type: 'button', onclick: resetList }, '목록 초기화'));
+}
+
+// 실행 중인 건이 있으면 버튼이 꺼져 있어요. 올린 파일과 job을 추적하지 못하게 되기 때문이에요
+function resetList() {
+  if (!window.confirm(`사정 건 ${state.cases.length}건을 모두 지울까요? 결과와 메모도 함께 지워지고 되돌릴 수 없어요. 내보내지 않은 결과는 먼저 내보내주세요`)) return;
+  for (const c of state.cases) {
+    clearBundle(c.id);
+    sources.delete(c.id);
+    evidence.delete(c.id);
+  }
+  state.cases = [];
+  persist();
+  selectCase(null);
+  renderCounts();
 }
 
 // ───── E 상세 (PF-07~09, PF-11) ─────
@@ -678,7 +677,7 @@ async function replaceFiles(c, files) {
 }
 
 function filesBlock(c) {
-  if (c.status === 'QUEUED' || c.status === 'RUNNING') return null;
+  if (c.status === 'RUNNING') return null;
   const src = sources.get(c.id);
   const asFolder = c.refsFrom === 'folder' && !src;
   const input = h('input', { type: 'file', class: 'sr-only', multiple: true, webkitdirectory: asFolder, accept: asFolder ? null : '.pdf,.jpg,.jpeg,.png', 'aria-label': '파일 올리기',
@@ -748,10 +747,10 @@ function renderDetail() {
         h('textarea', { value: c.memo, oninput: (e) => { c.memo = e.target.value; persist(); } }))),
     filesBlock(c),
     h('div', { class: 'actions' },
-      ['RECEIVED', 'INVALID'].includes(c.status) && h('button', { class: 'btn primary', type: 'button', disabled: !canRun(c), onclick: () => enqueue(c.id) }, '실행'),
+      ['RECEIVED', 'INVALID'].includes(c.status) && h('button', { class: 'btn primary', type: 'button', disabled: !canRun(c), onclick: () => startCase(c.id) }, '실행'),
       ['REVIEW', 'FAILED'].includes(c.status) && h('button', { class: 'btn', type: 'button', disabled: !canRun(c), title: canRun(c) ? null : '파일을 다시 올려주세요', onclick: () => rerun(c) }, '재실행'),
       c.status === 'REVIEW' && h('button', { class: 'btn primary', type: 'button', onclick: (e) => exportSingle(c, e.currentTarget) }, 'PDF로 내보내기'),
-      !['RUNNING', 'QUEUED'].includes(c.status) && h('button', { class: 'btn danger', type: 'button', onclick: () => {
+      c.status !== 'RUNNING' && h('button', { class: 'btn danger', type: 'button', onclick: () => {
         if (!window.confirm(`${c.label} 사정 건을 지울까요?`)) return;
         clearBundle(c.id);
         sources.delete(c.id);
@@ -901,8 +900,8 @@ async function init() {
   state.manifest = r.ok ? await r.json() : {};
   await refreshDepts();
 
-  // 실행중이던 건을 이어서 확인해요(동시 실행 수에 함께 들어가요)
-  for (const c of state.cases.filter((x) => x.status === 'RUNNING' && x.jobId)) queue.add({ id: c.id, resume: true });
+  // 실행중이던 건을 이어서 확인해요
+  for (const c of state.cases.filter((x) => x.status === 'RUNNING' && x.jobId)) execute(c.id, true);
 }
 
 init().catch((e) => {

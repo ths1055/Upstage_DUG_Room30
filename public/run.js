@@ -1,8 +1,7 @@
-// 실행 흐름 — 업로드 → 실행(409 재시도) → 폴링 → 파일 삭제 → 결과 검증, 동시 실행 큐
+// 실행 흐름 — 업로드 → 실행(409 재시도) → 폴링 → 파일 삭제 → 결과 검증. 건마다 따로 돌고, 동시 건수는 제한하지 않아요
 // 이 숫자를 바꾸면 설계서 7.5도 같이 고쳐요
 import { parseResult } from './core.js';
 
-export const CONCURRENCY = 2;
 const POLL_MS = 5_000;
 const MAX_WAIT_MS = 20 * 60_000;
 const RETRY_MS = 10_000;
@@ -89,18 +88,4 @@ export async function pollCase(c, save) {
     return save(c, finished({ status: 'FAILED', errorCode: 'E-RESULT-PARSE', error: '결과 형식에 문제가 있어요(원문 보기)', result: null, errors: p.errors, warnings: p.warnings, raw: p.raw }));
   }
   return save(c, finished({ status: 'REVIEW', result: p.result, errors: [], warnings: p.warnings }));
-}
-
-// 동시에 limit건만 worker를 돌리고, 나머지는 넣은 순서대로 기다려요
-export function createQueue(worker, limit = CONCURRENCY) {
-  const waiting = [];
-  let active = 0;
-  const next = () => {
-    while (active < limit && waiting.length) {
-      const item = waiting.shift();
-      active++;
-      Promise.resolve().then(() => worker(item)).catch((e) => console.error(e)).finally(() => { active--; next(); });
-    }
-  };
-  return { add(item) { waiting.push(item); next(); } };
 }

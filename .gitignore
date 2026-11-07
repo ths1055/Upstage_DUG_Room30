@@ -12,3 +12,4 @@ CLAUDE.md
 package-lock.json
 test_agent.py
 wrangler.toml
+data/

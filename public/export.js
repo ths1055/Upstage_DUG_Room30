@@ -1,7 +1,7 @@
 // 내보내기 — 판정별 건수, 정답지 형식 JSON, CSV, 결과 PDF에 넘길 모양. 판정은 에이전트 결과 그대로 옮겨요
 import { KEYS, DECISIONS, mapExcluded } from './core.js';
 
-export const STATUS_LABEL = { RECEIVED: '접수', INVALID: '검증실패', QUEUED: '대기', RUNNING: '실행중', REVIEW: '검토대기', FAILED: '실행실패' };
+export const STATUS_LABEL = { RECEIVED: '접수', INVALID: '검증실패', RUNNING: '실행중', REVIEW: '검토대기', FAILED: '실행실패' };
 
 // 판정이 끝난 건만
 export const judged = (cases) => cases.filter((c) => c.status === 'REVIEW' && c.result);

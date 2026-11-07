@@ -54,7 +54,7 @@ export async function buildBundle(PDFLib, items, refs, bundleName) {
 
 // 에이전트 글에 붙는 인용 표시(【†1】). API에는 이 표시가 없는 사본이 따로 없어요(설계서 10.1)
 const CITATION = /【†[^】]*】/g;
-const stripFence = (s) => String(s || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+const stripFence = (s) => String(s || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').replace(CITATION, '').trim();
 
 // Upstage의 output[].content[].text는 글 전체가 JSON 문자열로 한 번 더 감싸여 와요("{\"student_id\"… , "학생: …\n…"). 벗겨서 돌려줘요
 function unwrapText(text) {
@@ -73,7 +73,7 @@ export function parseResult(text, { inputStudentId = '' } = {}) {
   const errors = [], warnings = [];
   let r;
   // 값에 붙어 오는 인용 표시도 여기서 떼요. 판정·이유의 내용은 바꾸지 않아요
-  try { r = JSON.parse(stripFence(unwrapText(stripFence(text))), (_, v) => (typeof v === 'string' ? v.replace(CITATION, '') : v)); } catch { return { result: null, errors: ['JSON으로 읽히지 않음'], warnings, raw: text }; }
+  try { r = JSON.parse(stripFence(unwrapText(stripFence(text))))} catch { return { result: null, errors: ['JSON으로 읽히지 않음'], warnings, raw: text }; }
   if (typeof r === 'string') return { result: null, errors: ['JSON으로 읽히지 않음'], warnings, raw: text };
   if (r === null || typeof r !== 'object' || Array.isArray(r)) return { result: null, errors: ['JSON 객체가 아님'], warnings, raw: text };
   for (const k of KEYS) if (!(k in r)) errors.push(`${k} 없음`);
@@ -114,21 +114,24 @@ export function parseAreas(judgementText) {
 }
 
 // 폴더 일괄: <input webkitdirectory>나 끌어다 놓은 폴더의 파일들 → 학생 폴더별 사정 건
-// 고른 폴더 바로 아래의 폴더 하나가 학생 1명이에요. 그 안의 '기준문서/' 폴더는 그 학생에게 딸린 기준문서로 봐요.
-export function groupFolders(files, deptNames = []) {
+// 경로 규칙은 '학과/학번_이름/파일'이에요. 학번_이름 폴더 하나가 학생 1명이고, 바로 위 폴더 이름이 학과예요.
+// 학과 폴더를 골라도, 그 위 폴더를 골라도 돼요. 학생 폴더 안의 '기준문서/' 폴더는 그 학생에게 딸린 기준문서로 봐요.
+// groups[].skipped는 학생 폴더 안에서 형식이 달라 건너뛴 파일, skipped는 규칙에 맞는 학생 폴더 밖의 파일이에요
+export function groupFolders(files) {
   const OK = /\.(pdf|jpe?g|png)$/i;
+  const STUDENT = /^(\d{10})_(.+)$/;
   const groups = new Map(), skipped = [];
   for (const f of files) {
     const parts = (f.webkitRelativePath || f.name).normalize('NFC').split('/').filter(Boolean); // macOS는 한글 경로를 NFD로 줘서 학과명·기준문서 비교가 어긋나요
-    if (parts.length < 3 || !OK.test(f.name)) { skipped.push(parts.join('/')); continue; } // 루트/학생폴더/파일 구조가 아니거나 형식이 다르면 건너뜀
-    const folder = parts[1];
-    const g = groups.get(folder) || { folder, dept: deptNames.find((d) => folder.includes(d)) || null, items: [], refs: [] };
-    (parts.length > 3 && parts[2] === '기준문서' ? g.refs : g.items).push(f);
-    groups.set(folder, g);
+    const dirs = parts.slice(0, -1);
+    const at = dirs.findIndex((d) => STUDENT.test(d));
+    if (at < 1) { skipped.push(parts.join('/')); continue; } // 학생 폴더가 없거나 그 위에 학과 폴더가 없어요
+    const key = dirs.slice(0, at + 1).join('/');
+    const [, inputStudentId, inputName] = STUDENT.exec(dirs[at]);
+    const g = groups.get(key) || { key, folder: dirs[at], dept: dirs[at - 1], inputStudentId, inputName, items: [], refs: [], skipped: [] };
+    groups.set(key, g);
+    if (!OK.test(f.name)) g.skipped.push(parts.at(-1));
+    else (dirs[at + 1] === '기준문서' ? g.refs : g.items).push(f);
   }
-  for (const g of groups.values()) {
-    const m = /^(\d{10})(?:_|$)/.exec(g.folder);
-    g.inputStudentId = m ? m[1] : '';
-  }
-  return { groups: [...groups.values()].sort((a, b) => a.folder.localeCompare(b.folder, 'ko')), skipped };
+  return { groups: [...groups.values()].sort((a, b) => a.key.localeCompare(b.key, 'ko')), skipped };
 }
