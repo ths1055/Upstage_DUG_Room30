@@ -1,0 +1,14 @@
+node_modules/
+.dev.vars
+.wrangler/
+*.log
+samples/
+public/mock
+public/refs
+docs
+tests
+.dev.vars.example
+CLAUDE.md
+package-lock.json
+test_agent.py
+wrangler.toml
