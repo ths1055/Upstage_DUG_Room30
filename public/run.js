@@ -1,4 +1,4 @@
-// 실행 흐름 — 업로드 → 실행(409 재시도) → 폴링 → 파일 삭제 → 결과 검증. 건마다 따로 돌고, 동시 건수는 제한하지 않아요
+// 실행 흐름 — 업로드 → 실행(409·429·5xx 재시도) → 폴링 → 파일 삭제 → 결과 검증. 건마다 따로 돌고, 동시 건수는 제한하지 않아요
 // 이 숫자를 바꾸면 설계서 7.5도 같이 고쳐요
 import { parseResult } from './core.js';
 
@@ -6,11 +6,18 @@ const POLL_MS = 5_000;
 const MAX_WAIT_MS = 20 * 60_000;
 const RETRY_MS = 10_000;
 const MAX_RETRIES = 5;
+// 429·5xx·네트워크 오류: 한꺼번에 여러 건을 보내면 Upstage가 일부를 잠깐 거절해요. 기다렸다 다시 보내요
+// Retry-After가 오면 그만큼, 없으면 10초→20초→40초→60초→60초에 0~5초를 더해 건마다 엇갈리게 해요
+const BACKOFF_MAX_MS = 60_000;
+const JITTER_MS = 5_000;
 
 async function api(path, opt = {}) {
   const r = await fetch(path, opt);
   const body = (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
-  if (!r.ok) throw Object.assign(new Error(body?.error?.message || r.statusText), { status: r.status, body });
+  if (!r.ok) {
+    const retryAfter = Number(r.headers.get('retry-after')) * 1000 || null; // 초 단위만 읽어요
+    throw Object.assign(new Error(body?.error?.message || r.statusText), { status: r.status, body, retryAfter });
+  }
   return body;
 }
 
@@ -21,11 +28,26 @@ const finished = (patch) => ({ finishedAt: new Date().toISOString(), ...patch })
 // 응답을 받지 못했거나 서버 쪽 오류면 잠깐의 문제로 봐요
 const isTransient = (e) => e.status === undefined || e.status === 429 || e.status >= 500;
 
+// 오류 종류에 따라 다시 보낼지 정하고 기다려요. 다시 보내지 않으면 오류를 그대로 던져요
+// retry409: 실행 요청만 409(업로드한 파일을 아직 처리 중)를 다시 보내요
+async function withRetry(fn, { retry409 = false } = {}) {
+  for (let tries = 0; ; tries++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (tries >= MAX_RETRIES || e.body?.error?.code === 'E-CONFIG') throw e;
+      if (retry409 && e.status === 409) await sleep(RETRY_MS);
+      else if (isTransient(e)) await sleep(e.retryAfter ?? Math.min(RETRY_MS * 2 ** tries, BACKOFF_MAX_MS) + Math.random() * JITTER_MS);
+      else throw e;
+    }
+  }
+}
+
 // 던져진 오류 → 사정 건에 적을 코드·메시지(설계서 3.6)
 export function describeError(e) {
   if (e.body?.error?.code === 'E-CONFIG') return { errorCode: 'E-CONFIG', error: e.message, errors: [] }; // 다시 실행해도 안 되니 그대로 알려줘요
   if (e.status === 413) return { errorCode: 'E-UPLOAD-SIZE', error: '20MB까지 올릴 수 있어요', errors: [] };
-  if (isTransient(e)) return { errorCode: 'E-STUDIO-SERVER', error: '잠시 뒤 다시 실행해주세요', errors: [] };
+  if (isTransient(e)) return { errorCode: 'E-STUDIO-SERVER', error: '잠시 뒤 다시 실행해주세요', errors: [e.status ? `HTTP ${e.status} ${e.message}` : e.message].filter(Boolean) };
   return { errorCode: 'E-STUDIO-REQUEST', error: '실행 요청에 문제가 있어요', errors: [e.message].filter(Boolean) };
 }
 
@@ -36,19 +58,11 @@ export async function runCase(c, save) {
     const fd = new FormData();
     fd.append('purpose', 'user_data');
     fd.append('file', new Blob([c.bytes], { type: 'application/pdf' }), c.name);
-    const file = await api('/api/files', { method: 'POST', body: fd });
+    const file = await withRetry(() => api('/api/files', { method: 'POST', body: fd }));
     fileId = file.id ?? file.file_id;
     save(c, { fileId }); // 실행 전에 새로고침해도 올린 파일을 지울 수 있게 적어 둬요
 
-    for (let tries = 0; ; tries++) { // 409: 업로드한 파일을 아직 처리 중 → 10초 뒤 다시(최대 5번)
-      try {
-        run = await api('/api/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file_id: fileId }) });
-        break;
-      } catch (e) {
-        if (e.status !== 409 || tries >= MAX_RETRIES) throw e;
-        await sleep(RETRY_MS);
-      }
-    }
+    run = await withRetry(() => api('/api/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file_id: fileId }) }), { retry409: true });
   } catch (e) {
     if (fileId) removeFile(fileId);
     return save(c, finished({ status: 'FAILED', ...describeError(e) }));

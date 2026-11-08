@@ -85,14 +85,23 @@ export function parseResult(text, { inputStudentId = '' } = {}) {
   return { result: r, errors, warnings, raw: text };
 }
 
-// excluded_files의 "파일명 (3쪽)" → 쪽 지도에서 원본 파일 찾기
+// excluded_files 한 항목을 { file_name, category, page }로 맞춰요. 값은 JSON에 적힌 그대로 써요(인용 표시만 떼요)
+// 명세는 {file_name, category}예요. 실측(2026-11-08)에서는 file_name에 문서 제목이 쪽 번호 없이 왔어요
+// 문자열 항목이 와도 그 글을 file_name으로 봐요
+// "(3쪽)"처럼 쪽 번호가 적혀 있고 묶음 PDF의 쪽 지도에 있으면 page를 채워요 → 화면에서 누르면 미리보기가 그 쪽으로 가요
 export function mapExcluded(excluded, pageMap) {
-  return (excluded || []).map((x) => {
-    const m = /\((\d+)쪽\)\s*$/.exec(x.file_name || '');
-    const hit = m ? pageMap.find((p) => p.page === Number(m[1])) : null;
-    return { ...x, page: hit?.page ?? null, sourceFile: hit?.fileName ?? null, sourcePage: hit?.sourcePage ?? null, warning: m && !hit ? '쪽 지도에 없는 쪽' : null };
+  return (Array.isArray(excluded) ? excluded : []).filter((x) => x != null).map((x) => {
+    const o = typeof x === 'object' ? x : { file_name: String(x) };
+    const file_name = String(o.file_name ?? '').replace(CITATION, '').trim();
+    const category = String(o.category ?? '').replace(CITATION, '').trim();
+    const m = /\((\d+)쪽\)\s*$/.exec(file_name);
+    const hit = m ? (pageMap || []).find((p) => p.page === Number(m[1])) : null;
+    return { ...o, file_name, category, page: hit?.page ?? null };
   });
 }
+
+// 제외 파일 한 줄 글: JSON 그대로 "file_name (category)"
+export const excludedLabel = (x) => `${x.file_name}${x.category ? ` (${x.category})` : ''}`;
 
 // include=all 응답에서 판정 노드 텍스트 찾기. 노드 이름(model, 예: "Instruct - 판정")으로 찾고, 이름이 바뀌었으면 내용으로 찾아요
 export function findJudgement(full) {

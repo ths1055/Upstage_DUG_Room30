@@ -1,5 +1,6 @@
 // 판정 결과 보고서 PDF — 1명이면 1쪽, 여러 명이면 요약 1쪽 + 학생별 1쪽
 // fonts: { regular, bold } = 한글 글꼴 바이트(public/fonts/*.otf), fontkit은 @pdf-lib/fontkit
+import { mapExcluded, excludedLabel } from './core.js';
 const W = 595.28, H = 841.89, M = 48;
 const COLOR = { '졸업 가능': [0.13, 0.55, 0.30], '확인 필요': [0.85, 0.60, 0.05], '졸업 요건 부족': [0.80, 0.20, 0.18] };
 
@@ -75,7 +76,7 @@ export async function buildReport(PDFLib, fontkit, fonts, cases, { title = '졸�
     text('이유', { size: 11, font: B }); text(r.reason || c.error || '', { gap: 4 }); y -= 6;
     text('빠진 서류', { size: 11, font: B }); text((r.missing_documents || []).join(', ') || '없음'); y -= 6;
     text('제외된 파일', { size: 11, font: B });
-    text((c.excludedMapped || r.excluded_files || []).map((x) => `${x.sourceFile || x.file_name}${x.sourcePage ? ` ${x.sourcePage}쪽` : ''} (${x.category})`).join(', ') || '없음');
+    text((c.excludedMapped || mapExcluded(r.excluded_files, [])).map(excludedLabel).join(', ') || '없음');
     y -= 6;
     if (c.areas?.length) {
       text('영역별 결과', { size: 11, font: B, gap: 6 });

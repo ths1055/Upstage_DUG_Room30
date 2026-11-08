@@ -5,9 +5,7 @@ import { buildReport } from './report.js';
 import { runCase, pollCase, describeError } from './run.js';
 import { STATUS_LABEL, judged, countCases, buildAnswerJson, buildCsv, reportCases, singleReportName, batchReportName } from './export.js';
 
-const MOCK = new URLSearchParams(location.search).get('mock') === '1';
-// 목 모드 결과가 실제 결과 목록에 섞이지 않게 저장 키를 나눠요
-const CASES_KEY = MOCK ? 'jolup.mock.cases' : 'jolup.cases';
+const CASES_KEY = 'jolup.cases';
 const ROUND_KEY = 'jolup.round';
 const TYPE_LABEL = { grad_rule: '시행세칙', curriculum: '교육과정표', subst_table: '대체과목 인정표' };
 const DECISION_CLASS = { '졸업 가능': 'd-ok', '확인 필요': 'd-warn', '졸업 요건 부족': 'd-bad' };
@@ -140,7 +138,6 @@ function buildShell() {
   $('view-all').addEventListener('click', () => { state.allViews = true; updateShell(); });
   $('home').addEventListener('click', () => showView(defaultView()));
   $('nav-toggle').addEventListener('click', () => document.body.classList.toggle('nav-toggled'));
-  $('run-mode').textContent = MOCK ? '목 모드' : '실제 호출';
   state.view = defaultView();
   updateShell();
 }
@@ -331,23 +328,25 @@ function singleTab() {
     renderUpload();
   };
   const canAdd = s.files.length > 0 && (s.bundled || s.dept);
+  const perFile = s.bundled && s.files.length > 1; // 이미 묶인 파일은 파일마다 학생 1명이에요
   return h('div', { class: 'stack' },
     h('div', { class: 'row' },
       h('label', { class: 'field grow' }, h('span', {}, '학과'),
         h('select', { disabled: s.bundled, onchange: (e) => { s.dept = e.target.value; renderUpload(); } }, deptOptions(s.dept, '학과를 골라주세요'))),
       h('label', { class: 'field grow' }, h('span', {}, '학번(선택)'),
-        h('input', { type: 'text', inputMode: 'numeric', value: s.studentId, placeholder: '10자리', oninput: (e) => { s.studentId = e.target.value.trim(); } }))),
+        h('input', { type: 'text', inputMode: 'numeric', value: perFile ? '' : s.studentId, disabled: perFile, placeholder: perFile ? '여러 건은 비워 둬요' : '10자리', oninput: (e) => { s.studentId = e.target.value.trim(); } }))),
     h('label', { class: 'check' },
       h('input', { type: 'checkbox', checked: s.bundled, onchange: (e) => { s.bundled = e.target.checked; renderUpload(); } }),
       '기준문서가 이미 들어 있음'),
-    s.bundled && h('p', { class: 'hint' }, '학과 기준문서를 붙이지 않아요. 이미 묶인 파일에 켜요. 켜지 않으면 기준문서가 두 번 들어가서 매칭이 틀어져요.'),
+    s.bundled && h('p', { class: 'hint' }, '학과 기준문서를 붙이지 않아요. 이미 묶인 파일에 켜요. 켜지 않으면 기준문서가 두 번 들어가서 매칭이 틀어져요. 파일을 여러 개 올리면 파일마다 1건(학생 1명)씩 만들어요.'),
+    !s.bundled && h('p', { class: 'hint' }, '올린 파일을 모두 학생 1명의 서류로 보고 1건으로 묶어요.'),
     !s.bundled && info && !info.ready && h('p', { class: 'error-text' }, missingMessage(info.missing)),
-    dropzone({ multiple: true, title: '학생 1명의 파일 고르기', onFiles: addFiles }),
+    dropzone({ multiple: true, title: s.bundled ? '묶인 파일 고르기(여러 개 가능)' : '학생 1명의 파일 고르기', onFiles: addFiles }),
     s.rejected.length > 0 && h('p', { class: 'error-text' }, `${MSG_TYPE}: ${s.rejected.map((f) => f.name).join(', ')}`),
     s.files.length > 0 && h('ul', { class: 'file-list' }, s.files.map((f, i) => h('li', {}, h('span', {}, `${i + 1}. ${f.name}`),
       h('button', { class: 'btn small', type: 'button', onclick: () => { s.files.splice(i, 1); renderUpload(); } }, '빼기')))),
     h('div', { class: 'row center' },
-      h('button', { class: 'btn primary', type: 'button', disabled: !canAdd, onclick: addSingleCase }, '목록에 추가'),
+      h('button', { class: 'btn primary', type: 'button', disabled: !canAdd, onclick: addSingleCase }, perFile ? `목록에 추가 (${s.files.length}건)` : '목록에 추가'),
       !canAdd && h('span', { class: 'hint' }, s.bundled || s.dept ? '파일을 올려주세요' : '학과를 고르고 파일을 올려주세요')));
 }
 
@@ -402,7 +401,7 @@ function folderTab() {
 function renderUpload() {
   const tab = (id, label) => h('button', { class: 'tab', type: 'button', role: 'tab', 'aria-selected': String(state.tab === id), onclick: () => { state.tab = id; renderUpload(); } }, label);
   put($('upload'),
-    h('div', { class: 'tabs', role: 'tablist' }, tab('single', '개별(1명)'), tab('folder', '폴더 일괄')),
+    h('div', { class: 'tabs', role: 'tablist' }, tab('single', '파일 올리기'), tab('folder', '폴더 일괄')),
     state.tab === 'single' ? singleTab() : folderTab());
 }
 
@@ -447,25 +446,35 @@ async function buildCase(c) {
   }
 }
 
+// 기준문서가 이미 들어 있으면 파일마다 1건, 아니면 올린 파일을 모두 1건으로 묶어요
 async function addSingleCase() {
   const s = state.single;
   const items = s.files.map(toItem);
-  const first = items[0].name;
-  const c = newCase({
-    source: 'single',
-    label: items.length > 1 ? `${first} 외 ${items.length - 1}개` : first,
-    dept: s.bundled ? '' : s.dept,
-    refsFrom: s.bundled ? 'bundled' : 'dept',
-    inputStudentId: s.studentId,
-    ...(s.bundled ? { fileName: first } : {}), // 이미 묶인 파일은 원래 이름, 학과 기준문서를 붙이면 회차코드_번호
-  });
-  state.cases.push(c);
-  sources.set(c.id, { items, refs: [] });
+  const groups = s.bundled ? items.map((it) => [it]) : [items];
+  const studentId = groups.length > 1 ? '' : s.studentId;
   Object.assign(s, { files: [], rejected: [], studentId: '' });
   renderUpload();
-  await buildCase(c);
+  const added = [];
+  for (const group of groups) {
+    const first = group[0].name;
+    const c = newCase({ // nextNumber가 state.cases를 보니까 하나씩 넣어요
+      source: 'single',
+      label: group.length > 1 ? `${first} 외 ${group.length - 1}개` : first,
+      dept: s.bundled ? '' : s.dept,
+      refsFrom: s.bundled ? 'bundled' : 'dept',
+      inputStudentId: studentId,
+      ...(s.bundled ? { fileName: first } : {}), // 이미 묶인 파일은 원래 이름, 학과 기준문서를 붙이면 회차코드_번호
+    });
+    state.cases.push(c);
+    sources.set(c.id, { items: group, refs: [] });
+    added.push(c);
+  }
+  persist();
+  for (const c of added) await buildCase(c);
   showView('list'); // 실행 단추가 목록에 있어요
-  notify(c.status === 'INVALID' ? `추가했지만 실행할 수 없어요: ${c.error}` : `${c.label}을(를) 목록에 추가했어요`);
+  const bad = added.map((c) => findCase(c.id)).filter((c) => c?.status === 'INVALID');
+  if (added.length === 1) notify(bad.length ? `추가했지만 실행할 수 없어요: ${bad[0].error}` : `${added[0].label}을(를) 목록에 추가했어요`);
+  else notify(`${added.length}건을 목록에 추가했어요${bad.length ? `. ${bad.length}건은 실행할 수 없어요` : ''}. 목록의 '전부 실행'으로 한꺼번에 돌릴 수 있어요`);
 }
 
 async function runFolderCases() {
@@ -531,8 +540,7 @@ function restoreCases() {
 }
 
 // ───── D 목록 (PF-07) ─────
-const allWarnings = (c) => [...(c.warnings || []),
-  ...mapExcluded(c.result?.excluded_files, c.pageMap || []).filter((x) => x.warning).map((x) => `${x.file_name}: ${x.warning}`)];
+const allWarnings = (c) => c.warnings || [];
 
 function visibleCases() {
   const { decision, status } = state.filter;
@@ -702,11 +710,8 @@ function resultBlock(c) {
     h('div', {}, h('h3', {}, '빠진 서류'), r.missing_documents.length ? h('ul', { class: 'plain-list' }, r.missing_documents.map((d) => h('li', {}, d))) : h('p', {}, '없음')),
     h('div', {}, h('h3', {}, '제외 파일'), excluded.length
       ? h('ul', { class: 'plain-list' }, excluded.map((x) => h('li', {},
-        x.page
-          ? h('button', { class: 'link', type: 'button', onclick: () => goToPage(x.page) }, `${x.sourceFile} ${x.sourcePage}쪽`)
-          : x.file_name,
-        ` (${x.category})`,
-        x.warning && h('span', { class: 'error-text' }, ` ${x.warning}`))))
+        x.page ? h('button', { class: 'link', type: 'button', onclick: () => goToPage(x.page) }, x.file_name) : x.file_name,
+        x.category && ` (${x.category})`)))
       : h('p', {}, '없음')),
   ];
 }
@@ -817,8 +822,7 @@ async function makeReport(cases) {
   } catch {
     throw coded('E-REPORT-FONT', '글꼴을 불러오지 못해 PDF를 만들 수 없어요');
   }
-  const round = MOCK ? `목 모드 예시 ${state.round}`.trim() : state.round;
-  return buildReport(window.PDFLib, window.fontkit, fonts, reportCases(cases), { round });
+  return buildReport(window.PDFLib, window.fontkit, fonts, reportCases(cases), { round: state.round });
 }
 
 async function withBusy(button, fn) {
@@ -855,8 +859,7 @@ function buildExports() {
     const scope = exportScopeCases();
     const done = judged(scope);
     if (!done.length) { notify('판정이 끝난 건이 없어요'); return; }
-    const task = MOCK ? `목 모드 예시 ${state.round}`.trim() : state.round;
-    download(`사정결과_${done.length}건.json`, `${JSON.stringify(buildAnswerJson(scope, { round: task }), null, 2)}\n`, 'application/json');
+    download(`사정결과_${done.length}건.json`, `${JSON.stringify(buildAnswerJson(scope, { round: state.round }), null, 2)}\n`, 'application/json');
     if (scope.length > done.length) notify(`판정이 끝나지 않은 ${scope.length - done.length}건은 뺐어요`);
   } }, 'JSON');
   const csv = h('button', { class: 'btn', type: 'button', onclick: () => {
@@ -873,13 +876,6 @@ function buildExports() {
 
 // ───── 시작 ─────
 async function init() {
-  $('mock-band').hidden = !MOCK;
-  if (MOCK) {
-    const { createMockFetch } = await import('./mock.js');
-    const answers = await (await fetch('mock/answers.json')).json();
-    window.fetch = createMockFetch(window.fetch.bind(window), { answers, storage: localStorage });
-  }
-
   try { state.round = localStorage.getItem(ROUND_KEY) || ''; } catch { /* 저장소를 못 쓰면 비워 둬요 */ }
   const round = $('round');
   round.value = state.round;

@@ -1,5 +1,5 @@
 // 내보내기 — 판정별 건수, 정답지 형식 JSON, CSV, 결과 PDF에 넘길 모양. 판정은 에이전트 결과 그대로 옮겨요
-import { KEYS, DECISIONS, mapExcluded } from './core.js';
+import { KEYS, DECISIONS, mapExcluded, excludedLabel } from './core.js';
 
 export const STATUS_LABEL = { RECEIVED: '접수', INVALID: '검증실패', RUNNING: '실행중', REVIEW: '검토대기', FAILED: '실행실패' };
 
@@ -46,7 +46,7 @@ export function buildCsv(cases) {
     return [c.id, c.fileName, c.label, c.dept, STATUS_LABEL[c.status] ?? c.status,
       r.student_id, r.applicant_name, r.decision, r.reason,
       (r.missing_documents || []).join('; '),
-      mapExcluded(r.excluded_files, c.pageMap || []).map((x) => `${x.sourceFile ? `${x.sourceFile} ${x.sourcePage}쪽` : x.file_name} (${x.category})`).join('; '),
+      mapExcluded(r.excluded_files, c.pageMap || []).map(excludedLabel).join('; '),
       (c.warnings || []).join('; '), c.error, c.checked ? 'Y' : '', c.memo];
   });
   return `﻿${[head, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`;

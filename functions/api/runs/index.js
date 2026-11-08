@@ -1,5 +1,5 @@
 // POST /api/runs { file_id } → Upstage POST /v2/responses (에이전트 실행)
-import { upstage, json, FILE_ID } from '../../../lib/upstage.js';
+import { upstage, json, retryAfter, FILE_ID } from '../../../lib/upstage.js';
 
 export async function onRequestPost({ request, env }) {
   const { file_id } = await request.json().catch(() => ({}));
@@ -17,6 +17,6 @@ export async function onRequestPost({ request, env }) {
     }),
   });
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) return json(body, r.status);
+  if (!r.ok) return json(body, r.status, retryAfter(r));
   return json({ job_id: body.id, status: body.status });
 }
