@@ -78,6 +78,19 @@ function notify(message) {
   noticeTimer = setTimeout(() => { el.hidden = true; }, 6000);
 }
 
+// 로딩창: 묶음 PDF를 만드는 동안 보여줘요. done/total을 주면 막대를 채워요
+function showLoading(title, detail = '', done = 0, total = 0) {
+  $('loading-title').textContent = title;
+  $('loading-detail').textContent = detail;
+  $('loading-fill').style.width = total ? `${Math.round((done / total) * 100)}%` : '0%';
+  $('loading').hidden = false;
+  document.body.setAttribute('aria-busy', 'true');
+}
+function hideLoading() {
+  $('loading').hidden = true;
+  document.body.removeAttribute('aria-busy');
+}
+
 // ───── 틀: 왼쪽 메뉴, 위쪽 탭, 맨 아래 줄 ─────
 const shell = { tabs: new Map(), links: new Map(), groups: new Map() };
 const defaultView = () => (state.cases.length ? 'list' : 'upload');
@@ -470,7 +483,14 @@ async function addSingleCase() {
     added.push(c);
   }
   persist();
-  for (const c of added) await buildCase(c);
+  try {
+    for (const [i, c] of added.entries()) {
+      showLoading('서류를 묶는 중이에요', added.length > 1 ? `${i + 1}/${added.length}건 · ${c.label}` : c.label, i, added.length);
+      await buildCase(c);
+    }
+  } finally {
+    hideLoading();
+  }
   showView('list'); // 실행 단추가 목록에 있어요
   const bad = added.map((c) => findCase(c.id)).filter((c) => c?.status === 'INVALID');
   if (added.length === 1) notify(bad.length ? `추가했지만 실행할 수 없어요: ${bad[0].error}` : `${added[0].label}을(를) 목록에 추가했어요`);
@@ -483,11 +503,16 @@ async function runFolderCases() {
   renderUpload();
   const groups = f.groups.filter(groupRunnable);
   let started = 0;
-  for (const g of groups) {
-    const c = newCase({ source: 'folder', label: g.folder, dept: g.dept, refsFrom: g.refs.length ? 'folder' : 'dept', inputStudentId: g.inputStudentId, inputName: g.inputName });
-    state.cases.push(c);
-    sources.set(c.id, { items: g.items.map(toItem), refs: g.refs.map((file) => ({ name: file.name.normalize('NFC'), file })) });
-    if (await buildCase(c)) { startCase(c.id); started++; }
+  try {
+    for (const [i, g] of groups.entries()) {
+      showLoading('서류를 묶는 중이에요',`${i + 1}/${groups.length}건 · ${g.folder}`, i, groups.length);
+      const c = newCase({ source: 'folder', label: g.folder, dept: g.dept, refsFrom: g.refs.length ? 'folder' : 'dept', inputStudentId: g.inputStudentId, inputName: g.inputName });
+      state.cases.push(c);
+      sources.set(c.id, { items: g.items.map(toItem), refs: g.refs.map((file) => ({ name: file.name.normalize('NFC'), file })) });
+      if (await buildCase(c)) { startCase(c.id); started++; }
+    }
+  } finally {
+    hideLoading();
   }
   state.folder = emptyFolder();
   renderUpload();
@@ -552,10 +577,34 @@ function decisionChip(c) {
   return d ? h('span', { class: `decision ${DECISION_CLASS[d] || ''}` }, d) : h('span', { class: 'hint' }, '-');
 }
 
+// 실행중인 건의 단계: 파일 id·job id가 저장되는 때로 나눠요(run.js가 저장해요)
+function runStage(c) {
+  if (!c.fileId && !c.jobId) return '올리는 중';
+  if (!c.jobId) return '실행 요청 중';
+  return '에이전트 실행 중';
+}
+function elapsedText(c) {
+  const sec = Math.max(0, Math.floor((Date.now() - Date.parse(c.startedAt)) / 1000));
+  return Number.isFinite(sec) ? ` · ${Math.floor(sec / 60)}분 ${String(sec % 60).padStart(2, '0')}초` : '';
+}
+
 function statusTag(c) {
   const cls = { REVIEW: 'ok', FAILED: 'bad', INVALID: 'bad', RUNNING: 'active' }[c.status] || '';
+  if (c.status === 'RUNNING') {
+    return h('span', { class: `tag ${cls} running`, title: STATUS_LABEL.RUNNING },
+      h('span', { class: 'spinner small', 'aria-hidden': 'true' }),
+      runStage(c),
+      h('span', { class: 'elapsed', 'data-started': c.startedAt || '' }, elapsedText(c)));
+  }
   return h('span', { class: `tag ${cls}` }, STATUS_LABEL[c.status] ?? c.status);
 }
+
+// 경과 시간만 1초마다 고쳐요(목록 전체를 다시 그리지 않아요)
+setInterval(() => {
+  document.querySelectorAll('.tag.running .elapsed').forEach((el) => {
+    el.textContent = elapsedText({ startedAt: el.dataset.started });
+  });
+}, 1000);
 
 function selectCase(id) {
   state.selectedId = id;

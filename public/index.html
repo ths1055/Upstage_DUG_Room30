@@ -122,6 +122,15 @@
   </footer>
 
   <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <!-- 묶음 PDF를 만드는 동안 화면을 덮어요. 끝나면 목록으로 넘어가요 -->
+  <div id="loading" class="loading" role="status" aria-live="polite" hidden>
+    <div class="loading-box">
+      <div class="spinner" aria-hidden="true"></div>
+      <strong id="loading-title">준비하는 중이에요</strong>
+      <p id="loading-detail" class="hint"></p>
+      <div class="loading-bar" aria-hidden="true"><span id="loading-fill"></span></div>
+    </div>
+  </div>
   <noscript>이 페이지는 자바스크립트가 있어야 움직여요.</noscript>
 </body>
 </html>
