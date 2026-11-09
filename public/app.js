@@ -78,7 +78,7 @@ function notify(message) {
   noticeTimer = setTimeout(() => { el.hidden = true; }, 6000);
 }
 
-// 로딩창: 묶음 PDF를 만드는 동안 보여줘요. done/total을 주면 막대를 채워요
+// 로딩창: 묶음 PDF와 결과 PDF를 만드는 동안 보여줘요. done/total을 주면 막대를 채워요
 function showLoading(title, detail = '', done = 0, total = 0) {
   $('loading-title').textContent = title;
   $('loading-detail').textContent = detail;
@@ -555,6 +555,10 @@ function restoreCases() {
   try { saved = JSON.parse(localStorage.getItem(CASES_KEY)) || []; } catch { saved = []; }
   state.cases = saved;
   for (const c of state.cases) {
+    if (c.areasRaw && !c.areas?.length) { // 인용 표시 때문에 원문으로 저장됐던 근거를 다시 표로 읽어요
+      const areas = parseAreas(c.areasRaw);
+      if (areas) Object.assign(c, { areas, areasRaw: null });
+    }
     if (c.status === 'RUNNING' && c.jobId) continue;
     if (c.status === 'RUNNING' || c.status === 'QUEUED') { // QUEUED는 큐가 있던 때 저장된 건이에요
       if (c.fileId) fetch(`/api/files/${c.fileId}`, { method: 'DELETE' }).catch(() => {}); // 실행 전에 끊겼으니 올린 파일을 지워요
@@ -681,18 +685,25 @@ function resetList() {
 }
 
 // ───── E 상세 (PF-07~09, PF-11) ─────
+// 판정 근거를 받아 사정 건에 저장해요. 상세 버튼과 PDF 내보내기가 같이 써요
+async function fetchEvidence(c) {
+  const r = await fetch(`/api/runs/${c.jobId}/steps`);
+  if (r.status === 404) throw coded('gone', '근거를 더는 받을 수 없어요');
+  if (!r.ok) throw coded('fail', describeError({ status: r.status }).error);
+  const text = findJudgement(await r.json());
+  if (!text) throw coded('gone', '근거를 더는 받을 수 없어요');
+  const areas = parseAreas(text);
+  patchCase(c.id, { areas, areasRaw: areas ? null : text }); // 표 형식이 안 맞으면 원문 그대로
+}
+
+const needsEvidence = (c) => c.jobId && c.status === 'REVIEW' && !c.areas?.length && !c.areasRaw;
+
 async function loadEvidence(c) {
   evidence.set(c.id, { loading: true });
   renderDetail();
   try {
-    const r = await fetch(`/api/runs/${c.jobId}/steps`);
-    if (r.status === 404) throw coded('gone', '근거를 더는 받을 수 없어요');
-    if (!r.ok) throw coded('fail', describeError({ status: r.status }).error);
-    const text = findJudgement(await r.json());
-    if (!text) throw coded('gone', '근거를 더는 받을 수 없어요');
+    await fetchEvidence(c);
     evidence.delete(c.id);
-    const areas = parseAreas(text);
-    patchCase(c.id, { areas, areasRaw: areas ? null : text }); // 표 형식이 안 맞으면 원문 그대로
   } catch (e) {
     evidence.set(c.id, { message: e.code ? e.message : describeError(e).error });
     if (c.id === state.selectedId) renderDetail();
@@ -864,14 +875,34 @@ function loadFonts() {
   return fontsPromise;
 }
 
+// 화면이 로딩창을 그릴 틈을 줘요. 글꼴 넣기처럼 오래 붙잡는 일 앞에 써요
+const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+
 async function makeReport(cases) {
-  let fonts;
+  const what = cases.length > 1 ? `${cases.length}건` : (cases[0]?.label || '');
   try {
-    fonts = await loadFonts();
-  } catch {
-    throw coded('E-REPORT-FONT', '글꼴을 불러오지 못해 PDF를 만들 수 없어요');
+    showLoading('결과 PDF를 만드는 중이에요', `글꼴을 불러오는 중 · ${what}`, 0, 3);
+    let fonts;
+    try {
+      fonts = await loadFonts();
+    } catch {
+      throw coded('E-REPORT-FONT', '글꼴을 불러오지 못해 PDF를 만들 수 없어요');
+    }
+    // 판정 세부사항을 아직 안 받은 건은 먼저 받아요. 못 받은 건은 세부사항 없이 내보내요
+    const missing = cases.filter(needsEvidence);
+    let got = 0, failed = 0;
+    if (missing.length) {
+      const step = () => showLoading('결과 PDF를 만드는 중이에요', `판정 세부사항을 받는 중 · ${got + failed}/${missing.length}건`, 1 + (got + failed) / missing.length, 3);
+      step();
+      await Promise.all(missing.map((c) => fetchEvidence(c).then(() => { got++; }, () => { failed++; }).finally(step)));
+    }
+    showLoading('결과 PDF를 만드는 중이에요', `PDF를 그리는 중 · ${what}`, 2, 3);
+    await nextPaint();
+    const bytes = await buildReport(window.PDFLib, window.fontkit, fonts, reportCases(cases), { round: state.round }); // patchCase가 같은 객체를 고쳐서 받은 세부사항이 바로 들어가요
+    return { bytes, note: failed ? ` (${failed}건은 판정 세부사항을 받지 못해 빼고 만들었어요)` : '' };
+  } finally {
+    hideLoading();
   }
-  return buildReport(window.PDFLib, window.fontkit, fonts, reportCases(cases), { round: state.round });
 }
 
 async function withBusy(button, fn) {
@@ -889,7 +920,9 @@ async function withBusy(button, fn) {
 }
 
 const exportSingle = (c, button) => withBusy(button, async () => {
-  download(singleReportName(c), await makeReport([c]), 'application/pdf');
+  const { bytes, note } = await makeReport([c]);
+  download(singleReportName(c), bytes, 'application/pdf');
+  if (note) notify(note.trim().slice(1, -1));
 });
 
 function exportScopeCases() {
@@ -901,8 +934,9 @@ function buildExports() {
     const scope = exportScopeCases();
     const done = judged(scope);
     if (!done.length) { notify('판정이 끝난 건이 없어요'); return; }
-    download(batchReportName(state.round, done.length), await makeReport(done), 'application/pdf');
-    notify(scope.length > done.length ? `${done.length}건을 내보냈어요. 판정이 끝나지 않은 ${scope.length - done.length}건은 뺐어요` : `${done.length}건을 내보냈어요`);
+    const { bytes, note } = await makeReport(done);
+    download(batchReportName(state.round, done.length), bytes, 'application/pdf');
+    notify((scope.length > done.length ? `${done.length}건을 내보냈어요. 판정이 끝나지 않은 ${scope.length - done.length}건은 뺐어요` : `${done.length}건을 내보냈어요`) + note);
   }) }, '결과 PDF');
   const json = h('button', { class: 'btn', type: 'button', onclick: () => {
     const scope = exportScopeCases();

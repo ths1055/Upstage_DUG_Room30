@@ -1,4 +1,5 @@
 // 판정 결과 보고서 PDF — 1명이면 1쪽, 여러 명이면 요약 1쪽 + 학생별 1쪽
+// 판정 세부사항(areas 표, 없으면 areasRaw 원문)이 있으면 학생별 쪽에 넣어요. 원문이 길면 쪽이 늘어날 수 있어요
 // fonts: { regular, bold } = 한글 글꼴 바이트(public/fonts/*.otf), fontkit은 @pdf-lib/fontkit
 import { mapExcluded, excludedLabel } from './core.js';
 const W = 595.28, H = 841.89, M = 48;
@@ -78,11 +79,15 @@ export async function buildReport(PDFLib, fontkit, fonts, cases, { title = '졸�
     text('제외된 파일', { size: 11, font: B });
     text((c.excludedMapped || mapExcluded(r.excluded_files, [])).map(excludedLabel).join(', ') || '없음');
     y -= 6;
-    if (c.areas?.length) {
-      text('영역별 결과', { size: 11, font: B, gap: 6 });
+    if (c.areas?.length) { // 판정 세부사항: 영역별 표
+      text('판정 세부사항(영역별 결과)', { size: 11, font: B, gap: 6 });
       const aw = [80, 110, 70, W - 2 * M - 260];
       row(['영역', '이수/기준', '결과', '이유'], aw, { font: B, fill: rgb(0.94, 0.94, 0.94) });
       c.areas.forEach((a) => row([a.area, a.value, a.result, a.note], aw));
+      y -= 6;
+    } else if (c.areasRaw) { // 표 형식이 안 맞으면 원문 그대로(길면 다음 쪽으로 이어져요)
+      text('판정 세부사항(원문)', { size: 11, font: B, gap: 6 });
+      text(c.areasRaw, { size: 8.5, gap: 3 });
       y -= 6;
     }
     text(`실행 ${c.jobId || '-'} · ${c.finishedAt ? new Date(c.finishedAt).toLocaleString('ko-KR') : '-'}${c.checked ? ' · 담당자 확인함' : ''}${c.memo ? ' · 메모: ' + c.memo : ''}`,

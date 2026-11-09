@@ -52,13 +52,14 @@ export async function buildBundle(PDFLib, items, refs, bundleName) {
   return { name: bundleName, bytes: await out.save(), pageMap };
 }
 
-// 에이전트 글에 붙는 인용 표시(【†1】). API에는 이 표시가 없는 사본이 따로 없어요(설계서 10.1)
-const CITATION = /【†[^】]*】/g;
+// 에이전트 글에 붙는 인용 표시(【†1】, 【4:0†source】 꼴도). API에는 이 표시가 없는 사본이 따로 없어요(설계서 10.1)
+const CITATION = /【[^】]*†[^】]*】/g;
 const stripFence = (s) => String(s || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').replace(CITATION, '').trim();
 
 // Upstage의 output[].content[].text는 글 전체가 JSON 문자열로 한 번 더 감싸여 와요("{\"student_id\"… , "학생: …\n…"). 벗겨서 돌려줘요
+// 인용 표시는 먼저 떼요. 닫는 따옴표 뒤에 붙어 오면("…"【†37】) JSON.parse가 실패해서 \n이 글자로 남고, 판정 근거가 한 줄이 돼 표로 못 읽었어요
 function unwrapText(text) {
-  const t = String(text ?? '').trim();
+  const t = String(text ?? '').replace(CITATION, '').trim();
   if (!t.startsWith('"')) return t;
   try {
     const inner = JSON.parse(t);
@@ -111,13 +112,18 @@ export function findJudgement(full) {
 }
 
 // [작업 3] 10줄 → 표 ("영역: 이수/기준 - **결과** (이유)【†23】"). 굵게 표시와 인용 표시는 떼고 읽어요
+// 예전에 원문으로 저장된 글(이중 인코딩이 안 풀린 것)도 다시 읽을 수 있게 unwrapText를 한 번 더 거쳐요
 export function parseAreas(judgementText) {
   const AREAS = ['교양필수', '교양선택', '전공기초', '전공필수', '전공선택', '총학점', '평점', '어학', '졸업인증', '서류 확인'];
+  const canon = new Map(AREAS.map((a) => [a.replace(/\s/g, ''), a])); // '서류확인'처럼 띄어쓰기가 달라도 알아봐요
+  let text = unwrapText(judgementText);
+  if (!text.includes('\n') && text.includes('\\n')) text = text.replace(/\\n/g, '\n'); // 그래도 못 풀었으면 \n 글자를 줄바꿈으로 바꿔요
   const rows = [];
-  for (const raw of String(judgementText || '').split('\n')) {
+  for (const raw of text.split('\n')) {
     const line = raw.replace(CITATION, '').replaceAll('**', '');
-    const m = /^\s*(?:\d+\.\s*)?([^:：]+)[:：]\s*(.*?)\s*-\s*(충족|확인 필요|부족|해당 없음)\s*(?:\((.*)\))?\s*$/.exec(line);
-    if (m && AREAS.includes(m[1].trim())) rows.push({ area: m[1].trim(), value: m[2], result: m[3], note: m[4] || '' });
+    const m = /^[\s\-*#>]*(?:\d+[.)]\s*)?([^:：]+)[:：]\s*(.*?)\s*[-–—]\s*#?\s*(충족|확인 필요|부족|해당 없음)\s*(?:\((.*)\))?\s*$/.exec(line);
+    const area = m && canon.get(m[1].replace(/\s/g, ''));
+    if (area) rows.push({ area, value: m[2], result: m[3], note: m[4] || '' });
   }
   return rows.length ? rows : null; // 형식이 안 맞으면 null → 원문을 그대로 보여줘요
 }
